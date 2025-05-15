@@ -16,12 +16,17 @@ package com.onlyoffice.gateway.processor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.onlyoffice.common.client.notification.factory.NotificationProcessor;
 import com.onlyoffice.gateway.transport.websocket.SessionToken;
+import java.io.IOException;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.connection.Message;
 import org.springframework.data.redis.connection.MessageListener;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
@@ -36,13 +41,60 @@ import org.springframework.web.util.UriComponentsBuilder;
 @Component
 @RequiredArgsConstructor
 public class WebSocketNotificationProcessor extends TextWebSocketHandler
-    implements MessageListener, NotificationProcessor {
+    implements MessageListener, NotificationProcessor, DisposableBean {
+  @Value("${websocket.notification.max-connections:1000}")
+  private int maxConnections;
+
+  private final Map<String, WebSocketSession> sessionMap = new ConcurrentHashMap<>();
   private final Set<WebSocketSession> sessions = ConcurrentHashMap.newKeySet();
+  private final AtomicInteger activeConnectionsCount = new AtomicInteger(0);
+
   private final JwtDecoder jwtDecoder;
   private final ObjectMapper mapper;
 
   public void afterConnectionEstablished(@NotNull WebSocketSession session) {
-    sessions.add(session);
+    try {
+      if (activeConnectionsCount.get() >= maxConnections) {
+        log.warn(
+            "Maximum WebSocket connections ({}) reached. Rejecting new connection.",
+            maxConnections);
+        session.close(CloseStatus.SERVICE_OVERLOAD);
+        return;
+      }
+
+      var sessionToken = getSessionToken(session);
+      if (sessionToken == null) {
+        log.warn("WebSocket connection attempt without valid session token. Rejecting connection.");
+        session.close(CloseStatus.POLICY_VIOLATION);
+        return;
+      }
+
+      var existingSession = sessionMap.get(sessionToken);
+      if (existingSession != null && existingSession.isOpen()) {
+        log.warn("Duplicate session token detected. Closing the connection.");
+        try {
+          session.close(CloseStatus.SESSION_NOT_RELIABLE);
+          return;
+        } catch (Exception ex) {
+          log.error("Error closing existing session: {}", ex.getMessage());
+          return;
+        }
+      }
+
+      sessionMap.put(sessionToken, session);
+      sessions.add(session);
+      activeConnectionsCount.incrementAndGet();
+
+      log.debug(
+          "WebSocket connection established. Active connections: {}", activeConnectionsCount.get());
+    } catch (Exception e) {
+      log.error("Error establishing WebSocket connection: {}", e.getMessage());
+      try {
+        session.close(CloseStatus.SERVER_ERROR);
+      } catch (Exception ex) {
+        log.error("Error closing WebSocket session: {}", ex.getMessage());
+      }
+    }
   }
 
   public void afterConnectionClosed(
@@ -50,7 +102,21 @@ public class WebSocketNotificationProcessor extends TextWebSocketHandler
     try {
       log.debug("Removing websocket session from current instance registry");
 
-      sessions.remove(session);
+      String cleanupSession = null;
+      for (var entry : sessionMap.entrySet()) {
+        if (entry.getValue().getId().equals(session.getId())) {
+          cleanupSession = entry.getKey();
+          break;
+        }
+      }
+
+      if (cleanupSession != null) sessionMap.remove(cleanupSession);
+
+      var removed = sessions.remove(session);
+      if (removed) activeConnectionsCount.decrementAndGet();
+
+      log.debug(
+          "WebSocket connection closed. Active connections: {}", activeConnectionsCount.get());
     } finally {
       MDC.clear();
     }
@@ -119,5 +185,26 @@ public class WebSocketNotificationProcessor extends TextWebSocketHandler
     } catch (Exception e) {
       log.error("Failed to send message to session: {}", e.getMessage());
     }
+  }
+
+  public void destroy() throws Exception {
+    log.info("Shutting down WebSocketNotificationProcessor, closing {} sessions", sessions.size());
+    closeAllSessions();
+  }
+
+  private void closeAllSessions() {
+    var shutdownStatus = new CloseStatus(CloseStatus.GOING_AWAY.getCode(), "Server shutting down");
+
+    for (var session : sessions) {
+      try {
+        if (session.isOpen()) session.close(shutdownStatus);
+      } catch (IOException e) {
+        log.error("Error closing WebSocket session during shutdown: {}", e.getMessage());
+      }
+    }
+
+    sessions.clear();
+    sessionMap.clear();
+    activeConnectionsCount.set(0);
   }
 }
