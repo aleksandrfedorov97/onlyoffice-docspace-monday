@@ -26,8 +26,13 @@ import com.onlyoffice.gateway.client.UserServiceClient;
 import com.onlyoffice.gateway.security.MondayAuthenticationPrincipal;
 import com.onlyoffice.gateway.transport.rest.request.LoginUserCommand;
 import com.onlyoffice.gateway.transport.rest.request.SaveSettingsCommand;
+import feign.Feign;
+import feign.Target;
+import feign.jackson.JacksonDecoder;
+import feign.jackson.JacksonEncoder;
 import jakarta.validation.Valid;
 import java.net.URI;
+import java.util.HashSet;
 import java.util.function.Consumer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -51,12 +56,15 @@ public class SettingsController {
   private final EncryptionService encryptionService;
 
   public SettingsController(
-      DocSpaceClient docSpaceService,
       TenantServiceClient tenantService,
       UserServiceClient userService,
       NotificationPublisherFactory factory,
       EncryptionService encryptionService) {
-    this.docSpaceService = docSpaceService;
+    this.docSpaceService =
+        Feign.builder()
+            .encoder(new JacksonEncoder())
+            .decoder(new JacksonDecoder())
+            .target(Target.EmptyTarget.create(DocSpaceClient.class));
     this.tenantService = tenantService;
     this.userService = userService;
     this.messagePublisher = factory.getPublisher("notifications");
@@ -96,7 +104,9 @@ public class SettingsController {
     if (csp == null || csp.getResponse() == null)
       return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
 
-    if (!csp.getResponse().getDomains().contains(selfOrigin))
+    var domain = "https://%s.monday.com".formatted(user.getSlug());
+    var domains = new HashSet<>(csp.getResponse().getDomains());
+    if (!domains.contains(selfOrigin) || !domains.contains(domain))
       return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
 
     var response =

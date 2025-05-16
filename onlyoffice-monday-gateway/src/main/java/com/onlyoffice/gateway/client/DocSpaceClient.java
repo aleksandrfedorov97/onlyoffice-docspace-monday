@@ -16,13 +16,13 @@ package com.onlyoffice.gateway.client;
 import com.onlyoffice.common.docspace.transfer.response.CspInfo;
 import com.onlyoffice.common.docspace.transfer.response.GenericResponse;
 import feign.Headers;
+import feign.RequestLine;
 import java.net.URI;
 import org.springframework.cloud.openfeign.FeignClient;
-import org.springframework.web.bind.annotation.GetMapping;
 
 @FeignClient(name = "docSpaceClient", fallbackFactory = DocSpaceClientFallbackFactory.class)
 public interface DocSpaceClient {
-  @GetMapping("/api/2.0/security/csp")
+  @RequestLine("GET /api/2.0/security/csp")
   @Headers("Content-Type: application/json")
   GenericResponse<CspInfo> checkCSP(URI baseUri);
 }
