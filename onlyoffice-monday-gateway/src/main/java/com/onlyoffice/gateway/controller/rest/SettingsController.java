@@ -20,14 +20,22 @@ import com.onlyoffice.common.service.encryption.EncryptionService;
 import com.onlyoffice.common.tenant.transfer.request.command.RegisterTenant;
 import com.onlyoffice.common.tenant.transfer.request.command.RemoveTenant;
 import com.onlyoffice.common.user.transfer.request.command.RegisterUser;
+import com.onlyoffice.gateway.client.DocSpaceClient;
 import com.onlyoffice.gateway.client.TenantServiceClient;
 import com.onlyoffice.gateway.client.UserServiceClient;
 import com.onlyoffice.gateway.security.MondayAuthenticationPrincipal;
 import com.onlyoffice.gateway.transport.rest.request.LoginUserCommand;
 import com.onlyoffice.gateway.transport.rest.request.SaveSettingsCommand;
+import feign.Feign;
+import feign.Target;
+import feign.jackson.JacksonDecoder;
+import feign.jackson.JacksonEncoder;
 import jakarta.validation.Valid;
+import java.net.URI;
+import java.util.HashSet;
 import java.util.function.Consumer;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.annotation.Secured;
@@ -38,6 +46,10 @@ import org.springframework.web.bind.annotation.*;
 @RestController
 @RequestMapping(value = "/api/1.0/settings")
 public class SettingsController {
+  @Value("${server.origin}")
+  private String selfOrigin;
+
+  private final DocSpaceClient docSpaceService;
   private final TenantServiceClient tenantService;
   private final UserServiceClient userService;
   private final Consumer<NotificationEvent> messagePublisher;
@@ -48,6 +60,11 @@ public class SettingsController {
       UserServiceClient userService,
       NotificationPublisherFactory factory,
       EncryptionService encryptionService) {
+    this.docSpaceService =
+        Feign.builder()
+            .encoder(new JacksonEncoder())
+            .decoder(new JacksonDecoder())
+            .target(Target.EmptyTarget.create(DocSpaceClient.class));
     this.tenantService = tenantService;
     this.userService = userService;
     this.messagePublisher = factory.getPublisher("notifications");
@@ -82,6 +99,15 @@ public class SettingsController {
       @AuthenticationPrincipal MondayAuthenticationPrincipal user,
       @RequestBody @Valid SaveSettingsCommand body) {
     log.info("User attempts to save tenant DocSpace credentials");
+
+    var csp = docSpaceService.checkCSP(URI.create(body.getDocSpaceUrl()));
+    if (csp == null || csp.getResponse() == null)
+      return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
+
+    var domain = "https://%s.monday.com".formatted(user.getSlug());
+    var domains = new HashSet<>(csp.getResponse().getDomains());
+    if (!domains.contains(selfOrigin) || !domains.contains(domain))
+      return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
 
     var response =
         tenantService.createTenant(
