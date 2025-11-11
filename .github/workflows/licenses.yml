@@ -20,7 +20,7 @@ jobs:
           java-version: '21'
       - name: Delete Maven Wrappers
         run: |
-          mvnw install
+          ./mvnw install
           rm mvnw
           rm mvnw.cmd
       - name: Get Repository License
